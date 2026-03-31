@@ -39,9 +39,9 @@ python spark/spark_analysis.py
 
 ```
 results/
-├── summary.json          # Per-driver behavior summary (Function A)
-└── speed_data/
-    └── <driverID>.json   # Per-driver speed time-series (Function B)
+├── drivers_summary.json        # Per-driver behavior summary (Function A)
+└── per_driver_speed_data/
+    └── <driverID>.json         # Per-driver speed time-series (Function B)
 ```
 
 ### Options
