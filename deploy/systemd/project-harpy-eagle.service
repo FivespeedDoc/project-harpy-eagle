@@ -1,0 +1,17 @@
+[Unit]
+Description=Project Harpy Eagle Gunicorn service
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=www-data
+WorkingDirectory=/opt/project-harpy-eagle
+EnvironmentFile=/etc/project-harpy-eagle.env
+ExecStart=/opt/project-harpy-eagle/.venv/bin/gunicorn --config /opt/project-harpy-eagle/deploy/gunicorn.conf.py wsgi:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+

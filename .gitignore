@@ -41,6 +41,7 @@ out/
 .env
 .env.*
 !.env.example
+*.pem
 
 # === Logs === #
 *.log
@@ -68,3 +69,5 @@ coverage.xml
 # === Dataset and output === #
 dataset/
 results/
+project-harpy-eagle/
+deploy/emr-serverless/

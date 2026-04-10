@@ -1,22 +1,25 @@
 """
 pyspark analysis script for driver behavior data.
 
-Reads raw CSV records from dataset/detail-records/, computes:
-  1. Per-driver behavior summary  -> results/summary.json
-  2. Per-driver speed time-series -> results/speed_data/<driverID>.json
+Reads raw CSV records from dataset/detail-records/ or S3, computes:
+  1. Per-driver behavior summary  -> results/drivers_summary.json
+  2. Per-driver speed time-series -> results/per_driver_speed_data/<driverID>.json
 
 Run locally (from root dir):
     export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
-    source venv/bin/activate
-    python spark/spark_analysis.py
+    source .venv/bin/activate
+    pip install -r requirements-spark.txt
+    python spark/spark_analysis.py --master local[*]
 
-Run on Amazon S3
-    spark-submit spark/spark_analysis.py --input s3://bucket/dataset/ --output s3://bucket/results/
+Run on AWS (for example, EMR Serverless):
+    spark-submit spark/spark_analysis.py \
+        --input s3://bucket/project-harpy-eagle/dataset/detail-records/ \
+        --output s3://bucket/project-harpy-eagle/results/
 """
 
 import argparse
 import json
-import os
+from pathlib import Path
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -65,6 +68,20 @@ FLAG_COLS = [
 ]
 
 
+def build_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", default="dataset/detail-records/")
+    parser.add_argument("--output", default="results")
+    parser.add_argument(
+        "--master",
+        default=None,
+        help="Optional Spark master. Use this for local runs only. Leave unset on EMR or other cluster managers.",
+    )
+    parser.add_argument("--app-name", default="DriverBehaviorAnalysis")
+    parser.add_argument("--log-level", default="ERROR")
+    return parser
+
+
 def build_drivers_summary(df):
     """Aggregate per-driver behavior statistics (Function A)."""
     return df.groupBy("driverID", "carPlateNumber").agg(
@@ -88,48 +105,85 @@ def build_per_driver_speed_series(df):
     )
 
 
-def save_json(data, path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def _is_s3_path(path):
+    return str(path).startswith("s3://")
+
+
+def _join_output_path(base, *parts):
+    clean_parts = [str(part).strip("/") for part in parts if part]
+    if _is_s3_path(base):
+        base = str(base).rstrip("/")
+        if not clean_parts:
+            return base
+        return f"{base}/{'/'.join(clean_parts)}"
+
+    return str(Path(base).joinpath(*clean_parts))
+
+
+def _write_text_to_hadoop_path(spark, destination, payload):
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    path = spark._jvm.org.apache.hadoop.fs.Path(destination)
+    fs = path.getFileSystem(hadoop_conf)
+    parent = path.getParent()
+    if parent is not None and not fs.exists(parent):
+        fs.mkdirs(parent)
+
+    stream = fs.create(path, True)
+    try:
+        stream.write(bytearray(payload.encode("utf-8")))
+    finally:
+        stream.close()
+
+
+def save_json(spark, data, destination):
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+
+    if _is_s3_path(destination):
+        _write_text_to_hadoop_path(spark, destination, payload)
+        return
+
+    path = Path(destination)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload, encoding="utf-8")
+
+
+def create_spark_session(app_name, master=None):
+    builder = SparkSession.builder.appName(app_name)
+    if master:
+        builder = builder.master(master)
+    return builder.getOrCreate()
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input", default="dataset/detail-records/")
-    parser.add_argument("--output", default="results")
+    parser = build_parser()
     args = parser.parse_args()
 
-    spark = (
-        SparkSession.builder
-        .appName("DriverBehaviorAnalysis")
-        .master("local[*]")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("ERROR")
+    spark = create_spark_session(app_name=args.app_name, master=args.master)
+    spark.sparkContext.setLogLevel(args.log_level.upper())
 
-    df = spark.read.csv(args.input, schema=SCHEMA, header=False)
-    df = df.fillna(0, subset=FLAG_COLS)
-    # df.show(10, truncate=False)
+    df = spark.read.csv(args.input, schema=SCHEMA, header=False).fillna(0, subset=FLAG_COLS)
 
     # driver behavior summaries
     drivers_summary_df = build_drivers_summary(df)
     drivers_summary_data = [row.asDict() for row in drivers_summary_df.collect()]
-    save_json(drivers_summary_data, os.path.join(args.output, "drivers_summary.json"))
-    print(f"Drivers summary for {len(drivers_summary_data)} drivers saved")
+    drivers_summary_path = _join_output_path(args.output, "drivers_summary.json")
+    save_json(spark, drivers_summary_data, drivers_summary_path)
+    print(f"Drivers summary for {len(drivers_summary_data)} drivers saved to {drivers_summary_path}")
 
     # per-driver speed time-series
     per_driver_speed_series_df = build_per_driver_speed_series(df)
-    driver_ids = [row.driverID for row in df.select("driverID").distinct().collect()]
-    print(driver_ids)
-    per_driver_speed_series_output_dir = os.path.join(args.output, "per_driver_speed_data")
-    os.makedirs(per_driver_speed_series_output_dir, exist_ok=True)
+    driver_ids = [
+        row.driverID
+        for row in per_driver_speed_series_df.select("driverID").distinct().orderBy("driverID").collect()
+    ]
+    per_driver_speed_series_output_dir = _join_output_path(args.output, "per_driver_speed_data")
 
     for driver_id in driver_ids:
         rows = per_driver_speed_series_df.filter(F.col("driverID") == driver_id).collect()
         data = [row.asDict() for row in rows]
-        save_json(data, os.path.join(per_driver_speed_series_output_dir, f"{driver_id}.json"))
-        print(f"Speed series for driver {driver_id} saved with {len(data)} records")
+        output_path = _join_output_path(per_driver_speed_series_output_dir, f"{driver_id}.json")
+        save_json(spark, data, output_path)
+        print(f"Speed series for driver {driver_id} saved with {len(data)} records to {output_path}")
 
     print()
     print("Analysis complete!")

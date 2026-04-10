@@ -1,7 +1,10 @@
 <section id="panel-monitor" class="panel">
   <div class="panel-header">
     <h2>Real-Time Speed Monitor</h2>
-    <p class="subtitle">Select a driver to monitor driving speed — refreshes every 30 seconds</p>
+    <div class="monitor-subtitle-row">
+      <p class="subtitle">Select a driver to monitor driving speed — refreshes every 30 seconds</p>
+      <span id="next-refresh">Next refresh: —</span>
+    </div>
   </div>
 
   <p id="monitor-panel-status" class="panel-status hidden" role="status" aria-live="polite"></p>
@@ -24,7 +27,4 @@
     <canvas id="speed-chart"></canvas>
   </div>
 
-  <div class="monitor-info">
-    <span id="next-refresh">Next refresh: —</span>
-  </div>
 </section>

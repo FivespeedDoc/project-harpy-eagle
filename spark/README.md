@@ -1,13 +1,17 @@
 ## Spark Analysis
 
-`spark/spark_analysis.py` analyzes the driving behavior dataset under `dataset/` directory and outputs results. The results will be further used by the Flask app.
+`spark/spark_analysis.py` analyzes the driving behavior dataset and outputs the JSON files consumed by the Flask app.
 
-Ensure the raw data files are placed in `dataset/detail-records/`.
+The supported project deployment path is:
+
+- run the Spark job on the same EC2 instance that hosts the website
+- read raw files from `dataset/detail-records/`
+- write JSON output into `results/`
 
 
 ### Prerequisites
 
-- Python 3.12+ with `pyspark` installed
+- Python 3.12+ for local development
 - Java 17 (required by PySpark at runtime)
 
 #### Set Up Python Environment
@@ -18,7 +22,7 @@ If you have not set up the virtual environment yet, run the following commands f
 cd path/to/project-harpy-eagle
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-spark.txt
 ```
 
 #### Install Java (macOS)
@@ -32,7 +36,7 @@ brew install openjdk@17
 ```bash
 source .venv/bin/activate
 export JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"
-python spark/spark_analysis.py
+python spark/spark_analysis.py --master local[*]
 ```
 
 ### Output
@@ -48,13 +52,27 @@ results/
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--input` | `dataset/detail-records/` | Path to the raw CSV data files |
+| `--input` | `dataset/detail-records/` | Path to the raw data files |
 | `--output` | `results` | Directory to write the JSON results |
+| `--master` | unset | Spark master for local runs, for example `local[*]` |
+| `--app-name` | `DriverBehaviorAnalysis` | Spark application name |
+| `--log-level` | `ERROR` | Spark log level |
 
-Example with custom paths:
+Example with custom local paths:
 
 ```bash
-python spark/spark_analysis.py --input /path/to/data/ --output /path/to/output/
+python spark/spark_analysis.py --master local[*] --input /path/to/data/ --output /path/to/output/
 ```
 
-After the script finishes, start the Flask app from the project root with `python app.py`.
+### Run on AWS EC2
+
+Run the Spark job directly on the same EC2 instance that hosts the website.
+
+Example:
+
+```bash
+source .venv/bin/activate
+python spark/spark_analysis.py --master local[*]
+```
+
+After the analysis finishes and the JSON files are present under `results/`, start the Flask app from the project root with `gunicorn`.
