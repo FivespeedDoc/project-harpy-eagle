@@ -13,7 +13,8 @@
 
   var intervalId = null;
   var countdownId = null;
-  var currentOffset = 0;
+  var currentCursor = null;
+  var reachedEnd = false;
   var nextRefreshAt = 0;
 
   var BATCH_SIZE = 50;
@@ -73,7 +74,16 @@
     var driverId = driverSelect.value;
     if (!driverId) return;
 
-    var url = "/api/speed/" + driverId + "?offset=" + currentOffset + "&limit=" + BATCH_SIZE;
+    if (reachedEnd) {
+      reachedEnd = false;
+      currentCursor = null;
+      clearData();
+    }
+
+    var url = "/api/speed/" + encodeURIComponent(driverId) + "?limit=" + BATCH_SIZE;
+    if (currentCursor) {
+      url += "&cursor=" + encodeURIComponent(currentCursor);
+    }
     var resp = await fetch(url);
     var body = await resp.json();
     if (!resp.ok) {
@@ -84,8 +94,8 @@
     }
 
     if (body.count === 0) {
-      if (currentOffset > 0) {
-        currentOffset = 0;
+      if (currentCursor) {
+        currentCursor = null;
         clearData();
         return fetchBatch();
       }
@@ -98,11 +108,13 @@
     var hasOverspeed = body.records.some(function (record) {
       return record.isOverspeed === 1;
     });
+    var isRestartBatch = !currentCursor;
 
-    window.MonitorChart.update(body.records, currentOffset);
+    window.MonitorChart.update(body.records, isRestartBatch);
     window.MonitorMap.update(body.records);
 
-    currentOffset += body.count;
+    currentCursor = body.next_cursor || null;
+    reachedEnd = !body.has_more;
 
     if (hasOverspeed) {
       alertBox.classList.remove("hidden");
@@ -165,7 +177,8 @@
     statusBadge.textContent = "Monitoring";
     statusBadge.classList.add("running");
 
-    currentOffset = 0;
+    currentCursor = null;
+    reachedEnd = false;
 
     window.MonitorChart.init();
     window.MonitorChart.clear();

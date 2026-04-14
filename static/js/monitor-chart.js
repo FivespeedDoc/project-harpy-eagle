@@ -21,7 +21,7 @@
     chartScroll.scrollLeft = 0;
   }
 
-  function updateViewport(currentOffset) {
+  function updateViewport(resetToRight) {
     if (!chartScroll || !chartTrack) return;
 
     var wasNearRight = (
@@ -33,7 +33,7 @@
     chartTrack.style.width = desiredWidth + "px";
     if (chart) chart.resize();
 
-    if (wasNearRight || currentOffset === 0) {
+    if (wasNearRight || resetToRight) {
       chartScroll.scrollLeft = chartScroll.scrollWidth;
     }
   }
@@ -153,7 +153,7 @@
     }
   }
 
-  function update(records, currentOffset) {
+  function update(records, resetToRight) {
     records.forEach(function (record) {
       chartLabels.push(record.time);
       chartSpeeds.push(record.speed);
@@ -167,7 +167,7 @@
       chartOverspeed.splice(0, trim);
     }
 
-    updateViewport(currentOffset);
+    updateViewport(resetToRight);
 
     if (chart) {
       chart.data.datasets[1].data = chartLabels.map(function () { return 120; });

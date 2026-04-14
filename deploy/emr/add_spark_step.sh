@@ -5,18 +5,22 @@ set -euo pipefail
 usage() {
     cat <<'EOF'
 Usage:
-  add_spark_step.sh <emr-cluster-id> <s3-prefix>
+  add_spark_step.sh <emr-cluster-id> <s3-prefix> <summary-table> <events-table>
 
 Arguments:
   emr-cluster-id  EMR cluster identifier, for example j-3ABCDEF123456
   s3-prefix       Base S3 prefix for the project, for example:
                   s3://example-bucket/project-harpy-eagle
+  summary-table   DynamoDB summary table name
+  events-table    DynamoDB events table name
 
 Environment variables:
   SPARK_SCRIPT_URI  Optional override for the Spark script path
   SPARK_INPUT_URI   Optional override for the dataset prefix
-  SPARK_OUTPUT_URI  Optional override for the results prefix
+  SPARK_SUMMARY_TABLE  Optional override for the DynamoDB summary table
+  SPARK_EVENTS_TABLE   Optional override for the DynamoDB events table
   SPARK_LOG_LEVEL   Spark log level. Defaults to ERROR
+  SPARK_AWS_REGION  Optional AWS region passed through to the Spark job
   AWS_REGION        Optional AWS region passed to the AWS CLI
 EOF
 }
@@ -28,9 +32,11 @@ fi
 
 EMR_CLUSTER_ID="${1:-}"
 S3_PREFIX="${2:-}"
+SUMMARY_TABLE="${3:-${SPARK_SUMMARY_TABLE:-}}"
+EVENTS_TABLE="${4:-${SPARK_EVENTS_TABLE:-}}"
 
-if [[ -z "${EMR_CLUSTER_ID}" || -z "${S3_PREFIX}" ]]; then
-    echo "error: EMR cluster ID and S3 prefix are required" >&2
+if [[ -z "${EMR_CLUSTER_ID}" || -z "${S3_PREFIX}" || -z "${SUMMARY_TABLE}" || -z "${EVENTS_TABLE}" ]]; then
+    echo "error: EMR cluster ID, S3 prefix, summary table, and events table are required" >&2
     usage >&2
     exit 1
 fi
@@ -47,12 +53,34 @@ fi
 
 SCRIPT_URI="${SPARK_SCRIPT_URI:-${S3_PREFIX%/}/code/spark_analysis.py}"
 INPUT_URI="${SPARK_INPUT_URI:-${S3_PREFIX%/}/dataset/detail-records/}"
-OUTPUT_URI="${SPARK_OUTPUT_URI:-${S3_PREFIX%/}/results/}"
 SPARK_LOG_LEVEL="${SPARK_LOG_LEVEL:-ERROR}"
+SPARK_AWS_REGION="${SPARK_AWS_REGION:-${AWS_REGION:-}}"
 
 AWS_ARGS=()
 if [[ -n "${AWS_REGION:-}" ]]; then
     AWS_ARGS+=(--region "${AWS_REGION}")
+fi
+
+SPARK_ARGS=(
+  "spark-submit"
+  "--deploy-mode"
+  "cluster"
+  "${SCRIPT_URI}"
+  "--input"
+  "${INPUT_URI}"
+  "--summary-table"
+  "${SUMMARY_TABLE}"
+  "--events-table"
+  "${EVENTS_TABLE}"
+  "--log-level"
+  "${SPARK_LOG_LEVEL}"
+)
+
+if [[ -n "${SPARK_AWS_REGION}" ]]; then
+    SPARK_ARGS+=(
+      "--aws-region"
+      "${SPARK_AWS_REGION}"
+    )
 fi
 
 read -r -d '' STEP_JSON <<EOF || true
@@ -62,18 +90,7 @@ read -r -d '' STEP_JSON <<EOF || true
     "Name": "project-harpy-eagle-spark-analysis",
     "ActionOnFailure": "CONTINUE",
     "Jar": "command-runner.jar",
-    "Args": [
-      "spark-submit",
-      "--deploy-mode",
-      "cluster",
-      "${SCRIPT_URI}",
-      "--input",
-      "${INPUT_URI}",
-      "--output",
-      "${OUTPUT_URI}",
-      "--log-level",
-      "${SPARK_LOG_LEVEL}"
-    ]
+    "Args": $(printf '%s\n' "${SPARK_ARGS[@]}" | python3 -c 'import json,sys; print(json.dumps([line.rstrip("\n") for line in sys.stdin]))')
   }
 ]
 EOF

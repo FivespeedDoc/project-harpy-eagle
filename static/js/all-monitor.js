@@ -12,7 +12,8 @@
   if (!grid || !statusEl || !refreshInfo) return;
 
   var charts = {};
-  var offsets = {};
+  var cursors = {};
+  var reachedEnd = {};
   var latestEls = {};
   var hasStarted = false;
   var intervalId = null;
@@ -158,6 +159,20 @@
     chart.data.datasets[1].data.splice(0, trim);
   }
 
+  function clearDriver(driverId) {
+    var chart = charts[driverId];
+    if (!chart) return;
+
+    chart.data.labels.length = 0;
+    chart.data.datasets[0].data.length = 0;
+    chart.data.datasets[1].data.length = 0;
+    chart.update();
+
+    if (latestEls[driverId]) {
+      latestEls[driverId].textContent = "-- km/h";
+    }
+  }
+
   function applyRecords(driverId, records) {
     var chart = charts[driverId];
     if (!chart || !records.length) return;
@@ -178,9 +193,17 @@
   }
 
   async function fetchDriverBatch(driverId) {
+    if (reachedEnd[driverId]) {
+      reachedEnd[driverId] = false;
+      cursors[driverId] = null;
+      clearDriver(driverId);
+    }
+
     var url = "/api/speed/" + encodeURIComponent(driverId)
-      + "?offset=" + offsets[driverId]
-      + "&limit=" + BATCH_SIZE;
+      + "?limit=" + BATCH_SIZE;
+    if (cursors[driverId]) {
+      url += "&cursor=" + encodeURIComponent(cursors[driverId]);
+    }
     var resp = await fetch(url);
     var body = await resp.json();
 
@@ -191,12 +214,14 @@
       throw new Error("The speed-monitor response had an unexpected format for " + driverId + ".");
     }
 
-    if (body.count === 0 && offsets[driverId] > 0) {
-      offsets[driverId] = 0;
+    if (body.count === 0 && cursors[driverId]) {
+      cursors[driverId] = null;
+      clearDriver(driverId);
       return fetchDriverBatch(driverId);
     }
 
-    offsets[driverId] += body.count;
+    cursors[driverId] = body.next_cursor || null;
+    reachedEnd[driverId] = !body.has_more;
     applyRecords(driverId, body.records);
   }
 
@@ -238,7 +263,8 @@
       }
 
       drivers.slice(0, 10).forEach(function (driverId) {
-        offsets[driverId] = 0;
+        cursors[driverId] = null;
+        reachedEnd[driverId] = false;
         initChart(driverId, makeTile(driverId));
       });
 

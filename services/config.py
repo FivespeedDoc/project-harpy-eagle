@@ -1,7 +1,5 @@
 import os
-from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_SPEED_BATCH_SIZE = 50
 MAX_SPEED_BATCH_SIZE = 500
 
@@ -24,7 +22,10 @@ def build_config():
     return {
         "APP_HOST": os.getenv("APP_HOST", "127.0.0.1"),
         "APP_PORT": get_int_env("APP_PORT", 5000),
-        "RESULTS_DIR": Path(os.getenv("RESULTS_DIR", str(BASE_DIR / "results"))).expanduser().resolve(),
+        "AWS_REGION": os.getenv("AWS_REGION", ""),
+        "DDB_SUMMARY_TABLE": os.getenv("DDB_SUMMARY_TABLE", ""),
+        "DDB_EVENTS_TABLE": os.getenv("DDB_EVENTS_TABLE", ""),
+        "DDB_EVENTS_DATE_INDEX": os.getenv("DDB_EVENTS_DATE_INDEX", "event-date-index"),
         "DEFAULT_SPEED_BATCH_SIZE": default_batch_size,
         "MAX_SPEED_BATCH_SIZE": max_batch_size,
         "JSON_SORT_KEYS": False,

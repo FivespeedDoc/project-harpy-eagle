@@ -1,10 +1,8 @@
-import json
-
 from flask import Flask, current_app, jsonify, render_template, request
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from services.config import build_config
-from services.results_store import ResultsStore
+from services.dynamodb_store import DynamoDbResultsStore
 from services.summary_service import (
     aggregate_behavior_records,
     has_period_filter,
@@ -13,16 +11,16 @@ from services.summary_service import (
 
 
 def _results_store():
-    return ResultsStore(current_app.config["RESULTS_DIR"])
+    return DynamoDbResultsStore(current_app.config)
 
 
-def _get_batch_window():
-    offset = max(request.args.get("offset", 0, type=int), 0)
+def _get_batch_request():
+    cursor = request.args.get("cursor")
     limit = request.args.get("limit", current_app.config["DEFAULT_SPEED_BATCH_SIZE"], type=int)
     if limit <= 0:
         limit = current_app.config["DEFAULT_SPEED_BATCH_SIZE"]
 
-    return offset, min(limit, current_app.config["MAX_SPEED_BATCH_SIZE"])
+    return cursor, min(limit, current_app.config["MAX_SPEED_BATCH_SIZE"])
 
 
 def _json_error(message, status_code=503):
@@ -43,7 +41,7 @@ def register_routes(app):
         return jsonify({
             "status": "ok",
             "dashboard_ready": dashboard_status["ready"],
-            "results_dir": str(store.results_dir),
+            "store": store.describe(),
             "checks": {
                 "summary": store.summary_status(),
                 "speed": store.speed_status(),
@@ -72,10 +70,8 @@ def register_routes(app):
 
         try:
             return jsonify(store.load_summary())
-        except (FileNotFoundError, json.JSONDecodeError):
-            return _json_error(
-                "The summary data could not be read. Re-run the Spark analysis and refresh `RESULTS_DIR` to regenerate the results."
-            )
+        except RuntimeError as exc:
+            return _json_error(str(exc))
 
     @app.get("/api/drivers")
     def api_drivers():
@@ -84,7 +80,10 @@ def register_routes(app):
         if not results_status["ready"]:
             return _json_error(results_status["message"])
 
-        return jsonify(store.list_drivers())
+        try:
+            return jsonify(store.list_drivers())
+        except RuntimeError as exc:
+            return _json_error(str(exc))
 
     @app.get("/api/speed/<driver_id>")
     def api_speed(driver_id):
@@ -93,27 +92,16 @@ def register_routes(app):
         if not results_status["ready"]:
             return _json_error(results_status["message"])
 
+        cursor, limit = _get_batch_request()
         try:
-            data = store.load_speed_records(driver_id)
-        except json.JSONDecodeError:
-            return _json_error(
-                "The selected driver's speed data could not be read. Re-run the Spark analysis and refresh `RESULTS_DIR` to regenerate the results."
-            )
+            page = store.load_speed_page(driver_id, cursor, limit)
+        except (RuntimeError, ValueError) as exc:
+            return _json_error(str(exc), 400 if isinstance(exc, ValueError) else 503)
 
-        if data is None:
+        if page is None:
             return jsonify({"error": "driver not found"}), 404
 
-        offset, limit = _get_batch_window()
-        batch = data[offset : offset + limit]
-
-        return jsonify({
-            "driver_id": driver_id,
-            "total": len(data),
-            "offset": offset,
-            "limit": limit,
-            "count": len(batch),
-            "records": batch,
-        })
+        return jsonify(page)
 
 
 def _period_summary_response(store):
@@ -130,11 +118,9 @@ def _period_summary_response(store):
         return _json_error(behavior_status["message"])
 
     try:
-        records = store.load_behavior_records()
-    except (FileNotFoundError, json.JSONDecodeError):
-        return _json_error(
-            "The period-filter summary data could not be read. Re-run `python spark/spark_analysis.py` to regenerate the results."
-        )
+        records = store.query_behavior_records(start_time, end_time)
+    except RuntimeError as exc:
+        return _json_error(str(exc))
 
     return jsonify(aggregate_behavior_records(records, start_time, end_time))
 

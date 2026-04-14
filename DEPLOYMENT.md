@@ -2,137 +2,180 @@
 
 This guide documents one production architecture only:
 
-- `S3` stores the Spark script, raw dataset, generated JSON results, and EMR logs
+- `S3` stores the Spark script, raw dataset, and EMR logs
 - `EMR` runs the Spark analysis job
+- `DynamoDB` stores the processed summary and event data
 - `EC2` hosts the Flask application with `Gunicorn`
 - `Cloudflare Tunnel` exposes the EC2 web service
 
-This architecture cleanly separates batch analytics from the web tier:
+The production path is:
 
-1. raw files are uploaded to `S3`
-2. `EMR` runs `spark/spark_analysis.py`
-3. JSON results are written back to `S3`
-4. the EC2 web server syncs the `results/` prefix locally
-5. `Gunicorn` serves the dashboard from local JSON files
+1. upload the Spark script and dataset to `S3`
+2. create the DynamoDB tables
+3. run the Spark job on `EMR`
+4. write the processed output into DynamoDB
+5. start the Flask application on `EC2`
+6. expose the application through Cloudflare Tunnel
 
-## Final Architecture
+The EC2 host does not run Spark and does not maintain a local `results/` directory in this setup.
 
-Use exactly this setup:
+## Part 1: AWS Resources
 
-1. create one S3 bucket or one project prefix in an existing bucket
-2. upload the Spark script and dataset to `S3`
-3. create an EMR cluster with `Spark`
-4. submit the Spark analysis as an EMR step
-5. launch one Ubuntu EC2 instance for the website
-6. sync the S3 `results/` prefix onto the EC2 instance
-7. run the Flask app with `Gunicorn`
-8. expose the EC2 service with `Cloudflare Tunnel`
+### 1. Prepare the S3 prefix
 
-The EC2 host does not run Spark in this architecture.
-
-## Part 1: Prepare S3
-
-### 1. Create the S3 layout
-
-Create a bucket or a base prefix such as:
+Create a project prefix such as:
 
 ```text
 s3://PROJECT_BUCKET/project-harpy-eagle/
 ├── code/
 ├── dataset/detail-records/
-├── results/
 └── logs/
 ```
 
-Recommended naming:
+Recommended paths:
 
 - Spark script: `s3://PROJECT_BUCKET/project-harpy-eagle/code/spark_analysis.py`
-- raw data: `s3://PROJECT_BUCKET/project-harpy-eagle/dataset/detail-records/`
-- generated results: `s3://PROJECT_BUCKET/project-harpy-eagle/results/`
+- raw dataset: `s3://PROJECT_BUCKET/project-harpy-eagle/dataset/detail-records/`
 - EMR logs: `s3://PROJECT_BUCKET/project-harpy-eagle/logs/`
 
 Current project bucket example:
 
-- base prefix: `s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle/`
+- `s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle/`
 
-### 2. Prepare AWS permissions
+### 2. Prepare IAM permissions
 
-Two AWS permission paths are required:
+Three permission paths are required:
 
-- the local machine or CI environment that uploads assets and submits EMR steps needs an authenticated AWS CLI session
-- the EC2 web server needs read access to the S3 `results/` prefix
+1. the local machine or CI environment that uploads assets and submits EMR steps needs an authenticated AWS CLI session
+2. the EMR cluster needs:
+   - read access to the S3 `code/` and `dataset/detail-records/` prefixes
+   - write access to the S3 `logs/` prefix
+   - read and write access to the DynamoDB tables
+3. the EC2 web server needs read access to the DynamoDB tables
 
-Recommended IAM configuration:
+Recommended IAM model:
 
-- an EC2 instance role with `s3:GetObject` and `s3:ListBucket` for the project bucket
-- the default EMR roles, or custom EMR roles, with access to:
-  - read `code/`
-  - read `dataset/detail-records/`
-  - write `results/`
-  - write `logs/`
+- EMR uses the default EMR service role and instance profile, or equivalent custom roles
+- the EC2 instance role includes DynamoDB read access and `CloudWatchLogs` permissions if log shipping is desired
 
-## Part 2: Upload the Spark Assets to S3
+For the EC2 host, the minimum DynamoDB permissions are:
 
-### 3. Upload the script and dataset
+- `dynamodb:DescribeTable`
+- `dynamodb:Scan` on the summary table
+- `dynamodb:Query` on the events table and its date index
 
-From the project root on the local machine:
+For EMR, the Spark job additionally needs:
+
+- `dynamodb:BatchWriteItem`
+- `dynamodb:PutItem`
+- `dynamodb:DeleteItem`
+- `dynamodb:Scan`
+
+## Part 2: Local Preparation
+
+### 3. Authenticate the AWS CLI
+
+On the local machine:
 
 ```bash
 aws login
 export AWS_REGION=ap-southeast-1
-./scripts/upload_emr_assets_to_s3.sh s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle
 ```
 
-This uploads:
+### 4. Create the DynamoDB tables
 
-- [spark/spark_analysis.py](/Users/jimyang/PycharmProjects/project-harpy-eagle/spark/spark_analysis.py) to `code/`
-- `dataset/detail-records/` to `dataset/detail-records/`
-
-If the dataset lives outside the default local path, pass it explicitly:
+Run the repository helper from the project root:
 
 ```bash
-aws login
-export AWS_REGION=ap-southeast-1
-./scripts/upload_emr_assets_to_s3.sh s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle /path/to/detail-records
+./scripts/create_dynamodb_tables.sh \
+  project-harpy-eagle-driver-summary \
+  project-harpy-eagle-driver-events
+```
+
+This creates:
+
+1. summary table
+   - partition key: `driverID`
+2. events table
+   - partition key: `driverID`
+   - sort key: `eventKey`
+   - global secondary index: `event-date-index`
+     - partition key: `eventDate`
+     - sort key: `eventTimeDriverKey`
+
+The helper uses `PAY_PER_REQUEST` billing to avoid capacity planning for this project workload.
+
+### 5. Upload the Spark script and dataset
+
+From the project root:
+
+```bash
+./scripts/upload_emr_assets_to_s3.sh \
+  s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle
+```
+
+If the dataset is stored elsewhere locally:
+
+```bash
+./scripts/upload_emr_assets_to_s3.sh \
+  s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle \
+  /path/to/detail-records
 ```
 
 Manual equivalent:
 
 ```bash
-aws login
-export AWS_REGION=ap-southeast-1
-aws s3 cp spark/spark_analysis.py s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle/code/spark_analysis.py
-aws s3 sync dataset/detail-records/ s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle/dataset/detail-records/
+aws s3 cp spark/spark_analysis.py s3://PROJECT_BUCKET/project-harpy-eagle/code/spark_analysis.py
+aws s3 sync dataset/detail-records/ s3://PROJECT_BUCKET/project-harpy-eagle/dataset/detail-records/
 ```
 
 ## Part 3: Run Spark on EMR
 
-### 4. Create the EMR cluster
+### 6. Create the EMR cluster
 
 Create an EMR cluster with these minimum characteristics:
 
-- release line: current EMR 7.x release
-- applications: `Spark`
+- release line: current EMR 7.x
+- application bundle: `Spark`
 - log URI: `s3://PROJECT_BUCKET/project-harpy-eagle/logs/`
-- instance layout: at least one primary node and one core node
+- node layout: at least one primary node and one core node
 
-Notes:
+The Spark job should be submitted after cluster creation as a separate EMR step.
 
-- no `--master` argument should be passed to `spark/spark_analysis.py` on EMR
-- the script already supports `s3://...` input and output paths
+### 6A. Console configuration used for this project
 
-Cluster lifetime options:
+The EMR cluster used for this project was created in the AWS web console with the following settings:
 
-- if the cluster is configured to terminate after the last step, each Spark rerun requires creating a new EMR cluster
-- if repeated testing is expected, configure the cluster to stay alive while idle and use an auto-termination policy so the cluster can return to `WAITING` after each step and terminate only after the idle timeout expires
+- Amazon EMR release: `emr-7.12.0`
+- installed applications:
+  - `Hadoop 3.4.1`
+  - `Spark 3.5.6`
+- provisioning model: unified instance group
+- scaling mode: manual
+- node layout:
+  - 1 primary node
+  - 1 core node
+  - 0 task nodes
+- instance type:
+  - primary: `c3.2xlarge`
+  - core: `c3.2xlarge`
+- root volume:
+  - `gp3`
+  - `30 GiB`
+  - `3000` IOPS
+  - `125 MiB/s`
+- cluster-specific logging enabled to the project `logs/` prefix
+- no Spark step attached during cluster creation
+- EMR-created service role and instance profile
+- project VPC, subnet, and SSH key selected in the console
 
-Recommended testing setup:
+Environment-specific identifiers should be replaced with placeholders in submitted documentation.
 
-- use a long-running cluster during active testing
-- attach an auto-termination policy with an idle timeout
-- manually or automatically let the cluster terminate after testing is finished
+### 6B. Cluster lifetime behavior
 
-AWS CLI example for an idle timeout of one hour:
+If the cluster is configured to terminate after the last step, each Spark rerun requires a new cluster.
+
+If repeated testing is expected, configure the cluster to remain alive while idle and attach an auto-termination policy, for example:
 
 ```bash
 aws emr put-auto-termination-policy \
@@ -141,110 +184,41 @@ aws emr put-auto-termination-policy \
   --region ap-southeast-1
 ```
 
-With this configuration:
+With that setup:
 
-- completed Spark steps leave the cluster in `WAITING`
-- additional Spark steps can be submitted while the cluster remains idle but alive
-- if no further work is submitted before the timeout expires, EMR terminates the cluster automatically
+- completed steps leave the cluster in `WAITING`
+- additional Spark steps can be submitted during the idle window
+- EMR terminates the cluster automatically after the idle timeout expires
 
-### 4A. Reference EMR Configuration Used in the Console
-
-The EMR cluster used for this project was configured in the AWS web console with the following settings:
-
-- cluster name: a project-specific cluster name
-- Amazon EMR release: `emr-7.12.0`
-- application bundle type: `Custom`
-- installed applications:
-  - `Hadoop 3.4.1`
-  - `Spark 3.5.6`
-
-Operating system configuration:
-
-- Amazon Linux release provided by EMR
-- automatic Amazon Linux updates enabled
-- no custom AMI
-
-Provisioning model:
-
-- unified instance group mode
-- manual sizing
-- no EMR managed scaling policy
-- no custom autoscaling configuration
-
-Node layout:
-
-- 1 primary node
-- 1 core node
-- 0 task nodes
-- primary node high availability not enabled
-
-Instance configuration:
-
-- primary node instance type: `c3.2xlarge`
-- core node instance type: `c3.2xlarge`
-- each node uses a `gp3` EBS root volume
-- root volume size: `30 GiB`
-- provisioned IOPS: `3000`
-- provisioned throughput: `125 MiB/s`
-
-Step and logging configuration:
-
-- no Spark step attached during cluster creation
-- cluster-specific logging to the project S3 log prefix
-- log prefix: `project-harpy-eagle/logs`
-
-Security and IAM configuration:
-
-- an EC2 key pair was selected for SSH access
-- the cluster was launched inside a project VPC and subnet selected in the console
-- EMR was allowed to create the service role
-- EMR was allowed to create the EC2 instance profile
-- S3 access was restricted to the required project prefixes rather than granting unrestricted access to all buckets
-
-This reference configuration matches the project workflow:
-
-1. upload Spark code and raw data to S3
-2. create the EMR cluster
-3. submit the Spark analysis as a separate EMR step
-4. write generated JSON results back to S3
-5. sync the S3 results onto the EC2 web server
-
-### 5. Submit the Spark step
+### 7. Submit the Spark step
 
 Use the helper script:
 
 ```bash
-./deploy/emr/add_spark_step.sh j-XXXXXXXXXXXXX s3://PROJECT_BUCKET/project-harpy-eagle
+./deploy/emr/add_spark_step.sh \
+  j-XXXXXXXXXXXXX \
+  s3://PROJECT_BUCKET/project-harpy-eagle \
+  project-harpy-eagle-driver-summary \
+  project-harpy-eagle-driver-events
 ```
 
 This submits a Spark step equivalent to:
 
 ```bash
-spark-submit --deploy-mode cluster s3://PROJECT_BUCKET/project-harpy-eagle/code/spark_analysis.py \
+spark-submit --deploy-mode cluster \
+  s3://PROJECT_BUCKET/project-harpy-eagle/code/spark_analysis.py \
   --input s3://PROJECT_BUCKET/project-harpy-eagle/dataset/detail-records/ \
-  --output s3://PROJECT_BUCKET/project-harpy-eagle/results/
+  --summary-table project-harpy-eagle-driver-summary \
+  --events-table project-harpy-eagle-driver-events \
+  --aws-region ap-southeast-1 \
+  --log-level ERROR
 ```
 
-### 6. Verify EMR output
+### 8. Verify the EMR step
 
-After the step completes, confirm these objects exist in S3:
+The step submission returns a step ID such as `s-XXXXXXXXXXXXX`.
 
-```text
-s3://PROJECT_BUCKET/project-harpy-eagle/results/drivers_summary.json
-s3://PROJECT_BUCKET/project-harpy-eagle/results/driver_behavior_records.json
-s3://PROJECT_BUCKET/project-harpy-eagle/results/per_driver_speed_data/*.json
-```
-
-Example:
-
-```bash
-aws s3 ls s3://PROJECT_BUCKET/project-harpy-eagle/results/
-aws s3 ls s3://PROJECT_BUCKET/project-harpy-eagle/results/per_driver_speed_data/ | head
-```
-
-### 6A. Verify Successful EMR Step Completion
-
-Use the EMR step ID returned by `aws emr add-steps` and verify the step status:
+Check the state:
 
 ```bash
 aws emr describe-step \
@@ -253,7 +227,7 @@ aws emr describe-step \
   --region ap-southeast-1
 ```
 
-A successful run should show:
+Successful execution means:
 
 - `Name`: `project-harpy-eagle-spark-analysis`
 - `ActionOnFailure`: `CONTINUE`
@@ -275,8 +249,12 @@ Minimal successful example:
         "s3://PROJECT_BUCKET/project-harpy-eagle/code/spark_analysis.py",
         "--input",
         "s3://PROJECT_BUCKET/project-harpy-eagle/dataset/detail-records/",
-        "--output",
-        "s3://PROJECT_BUCKET/project-harpy-eagle/results/",
+        "--summary-table",
+        "project-harpy-eagle-driver-summary",
+        "--events-table",
+        "project-harpy-eagle-driver-events",
+        "--aws-region",
+        "ap-southeast-1",
         "--log-level",
         "ERROR"
       ]
@@ -289,32 +267,39 @@ Minimal successful example:
 }
 ```
 
-After a completed step, the S3 verification should show:
+### 9. Verify the DynamoDB output
 
-- `drivers_summary.json` in the `results/` prefix
-- multiple per-driver JSON files in `results/per_driver_speed_data/`
+After the step completes, confirm the data landed in DynamoDB.
 
-Example verification commands:
+Summary table check:
 
 ```bash
-aws s3 ls s3://PROJECT_BUCKET/project-harpy-eagle/results/
-aws s3 ls s3://PROJECT_BUCKET/project-harpy-eagle/results/per_driver_speed_data/ | head
+aws dynamodb scan \
+  --table-name project-harpy-eagle-driver-summary \
+  --limit 5 \
+  --region ap-southeast-1
 ```
 
-Expected outcome:
+Events table check:
 
-- a `drivers_summary.json` object exists
-- a `per_driver_speed_data/` prefix exists
-- multiple `<driver_id>.json` files are present under that prefix
+```bash
+aws dynamodb query \
+  --table-name project-harpy-eagle-driver-events \
+  --key-condition-expression 'driverID = :driver_id' \
+  --expression-attribute-values '{":driver_id":{"S":"xiexiao1000001"}}' \
+  --limit 5 \
+  --region ap-southeast-1
+```
 
-Note:
+Successful verification means:
 
-- the S3 console or `aws s3 ls` may show zero-byte folder marker objects for prefixes
-- the actual success criteria are the generated JSON result files, not the marker objects
+- the summary table contains one item per driver
+- the events table contains multiple event rows per driver
+- the Flask app can later return `200` from `/ready`
 
 ## Part 4: Launch and Prepare the EC2 Web Server
 
-### 7. Launch the EC2 instance
+### 10. Launch the EC2 instance
 
 Use Ubuntu `24.04`.
 
@@ -326,36 +311,36 @@ Security group:
 
 - allow `22/tcp` from the administrator IP address
 
-Because this guide uses Cloudflare Tunnel, `80/tcp` and `443/tcp` do not need to be exposed publicly.
+Because this guide uses Cloudflare Tunnel, public `80/tcp` and `443/tcp` are not required.
 
-Attach the EC2 IAM role that can read the S3 `results/` prefix.
+Attach the EC2 IAM role that can read the DynamoDB tables.
 
-### 8. Connect to the instance
+### 11. Connect to the instance
 
 ```bash
 ssh -i /path/to/ec2-key.pem ubuntu@EC2_PUBLIC_IP
 ```
 
-### 9. Install system packages
+### 12. Install system packages
 
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip unzip curl
 ```
 
-The EC2 web host does not need Java or PySpark in this architecture.
+The EC2 web host does not need Java or PySpark.
 
-### 9A. Install AWS CLI v2 on Ubuntu
+### 12A. Install AWS CLI v2 on Ubuntu
 
-AWS CLI v2 is the recommended installation path on the EC2 host.
+AWS CLI v2 is the recommended installation path on the EC2 host for diagnostics and operational verification.
 
-Check the machine architecture first:
+Check the machine architecture:
 
 ```bash
 uname -m
 ```
 
-If the output is `x86_64`, install AWS CLI v2 with:
+If the output is `x86_64`:
 
 ```bash
 curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
@@ -364,7 +349,7 @@ sudo ./aws/install
 aws --version
 ```
 
-If the output is `aarch64`, install the ARM build:
+If the output is `aarch64`:
 
 ```bash
 curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
@@ -373,15 +358,15 @@ sudo ./aws/install
 aws --version
 ```
 
-After installation, verify that the EC2 IAM role is available to the instance:
+Verify the EC2 IAM role:
 
 ```bash
 aws sts get-caller-identity
 ```
 
-If the EC2 instance role was attached recently, the credentials may take a short time to appear. A reboot is usually not required.
+If the IAM role was attached recently, credentials may take a short time to appear. A reboot is usually not required.
 
-### 10. Copy the repository to the instance
+### 13. Copy the repository to the instance
 
 ```bash
 cd /opt
@@ -390,10 +375,9 @@ sudo chown -R ubuntu:www-data /opt/project-harpy-eagle
 cd /opt/project-harpy-eagle
 ```
 
-### 11. Create the Python environment
+### 14. Create the Python environment
 
 ```bash
-cd /opt/project-harpy-eagle
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
@@ -402,12 +386,9 @@ pip install -r requirements.txt
 
 The production web server only needs [requirements.txt](/Users/jimyang/PycharmProjects/project-harpy-eagle/requirements.txt).
 
-## Part 5: Sync Results from S3 onto EC2
-
-### 12. Prepare the web app environment file
+### 15. Prepare the web app environment file
 
 ```bash
-cd /opt/project-harpy-eagle
 sudo cp .env.example /etc/project-harpy-eagle.env
 sudo chown root:root /etc/project-harpy-eagle.env
 sudo chmod 644 /etc/project-harpy-eagle.env
@@ -417,9 +398,12 @@ sudo nano /etc/project-harpy-eagle.env
 Recommended contents:
 
 ```bash
+AWS_REGION=ap-southeast-1
+DDB_SUMMARY_TABLE=project-harpy-eagle-driver-summary
+DDB_EVENTS_TABLE=project-harpy-eagle-driver-events
+DDB_EVENTS_DATE_INDEX=event-date-index
 APP_HOST=127.0.0.1
 APP_PORT=5000
-RESULTS_DIR=/opt/project-harpy-eagle/results
 DEFAULT_SPEED_BATCH_SIZE=50
 MAX_SPEED_BATCH_SIZE=500
 GUNICORN_BIND=127.0.0.1:8000
@@ -428,29 +412,9 @@ GUNICORN_THREADS=4
 GUNICORN_TIMEOUT=120
 ```
 
-### 13. Run the first S3 sync
+## Part 5: Run and Validate the Website
 
-```bash
-cd /opt/project-harpy-eagle
-./scripts/sync_results_from_s3.sh s3://PROJECT_BUCKET/project-harpy-eagle/results/
-```
-
-Equivalent AWS CLI command:
-
-```bash
-aws s3 sync s3://PROJECT_BUCKET/project-harpy-eagle/results/ /opt/project-harpy-eagle/results/ --delete
-```
-
-### 14. Verify the local results directory
-
-```bash
-ls /opt/project-harpy-eagle/results
-ls /opt/project-harpy-eagle/results/per_driver_speed_data | head
-```
-
-## Part 6: Run and Validate the Website
-
-### 15. Smoke-test the Flask app
+### 16. Smoke-test the Flask app
 
 ```bash
 cd /opt/project-harpy-eagle
@@ -471,11 +435,11 @@ curl http://127.0.0.1:5000/ready
 Expected:
 
 - `/health` returns `200`
-- `/ready` returns `200` when the synced result files are present
+- `/ready` returns `200` when the DynamoDB tables are accessible and populated
 
-Stop the dev server with `Ctrl+C`.
+Stop the development server with `Ctrl+C`.
 
-### 16. Smoke-test Gunicorn
+### 17. Smoke-test Gunicorn
 
 ```bash
 cd /opt/project-harpy-eagle
@@ -502,7 +466,7 @@ Expected:
 
 Stop Gunicorn with `Ctrl+C`.
 
-### 17. Install the systemd web service
+### 18. Install the systemd web service
 
 ```bash
 sudo cp deploy/systemd/project-harpy-eagle.service /etc/systemd/system/
@@ -522,48 +486,9 @@ sudo systemctl status project-harpy-eagle
 sudo journalctl -u project-harpy-eagle -n 100 --no-pager
 ```
 
-## Part 7: Optional Automatic S3 Result Refresh
+## Part 6: Expose the Site with Cloudflare Tunnel
 
-### 18. Prepare the sync environment file
-
-```bash
-sudo cp deploy/systemd/project-harpy-eagle-sync.env.example /etc/project-harpy-eagle-sync.env
-sudo chown root:root /etc/project-harpy-eagle-sync.env
-sudo chmod 644 /etc/project-harpy-eagle-sync.env
-sudo nano /etc/project-harpy-eagle-sync.env
-```
-
-Example contents:
-
-```bash
-S3_RESULTS_URI=s3://PROJECT_BUCKET/project-harpy-eagle/results/
-LOCAL_RESULTS_DIR=/opt/project-harpy-eagle/results
-AWS_REGION=ap-southeast-1
-```
-
-### 19. Install the sync service and timer
-
-```bash
-sudo cp deploy/systemd/project-harpy-eagle-sync-results.service /etc/systemd/system/
-sudo cp deploy/systemd/project-harpy-eagle-sync-results.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable project-harpy-eagle-sync-results.timer
-sudo systemctl start project-harpy-eagle-sync-results.timer
-```
-
-Manual test:
-
-```bash
-sudo systemctl start project-harpy-eagle-sync-results.service
-sudo systemctl status project-harpy-eagle-sync-results.service
-sudo systemctl status project-harpy-eagle-sync-results.timer
-```
-
-The timer refreshes local results every five minutes.
-
-## Part 8: Expose the Site with Cloudflare Tunnel
-
-### 20. Install `cloudflared`
+### 19. Install `cloudflared`
 
 ```bash
 sudo mkdir -p --mode=0755 /usr/share/keyrings
@@ -573,7 +498,7 @@ sudo apt-get update
 sudo apt-get install -y cloudflared
 ```
 
-### 21. Create the tunnel in the Cloudflare dashboard
+### 20. Create the tunnel in the Cloudflare dashboard
 
 In the Cloudflare Zero Trust web console:
 
@@ -583,15 +508,15 @@ In the Cloudflare Zero Trust web console:
 4. name it `project-harpy-eagle`
 5. keep the setup page open so the generated tunnel token can be copied
 
-### 22. Configure the public hostname
+### 21. Configure the public hostname
 
-Still in the Cloudflare dashboard, add a public hostname for the tunnel:
+In the Cloudflare dashboard, add a public hostname:
 
 - hostname: the chosen public hostname, for example `harpy.example.com`
 - service type: `HTTP`
 - URL: `http://localhost:8000`
 
-### 23. Install the tunnel as a service
+### 22. Install the tunnel as a service
 
 ```bash
 sudo cloudflared service install YOUR_TUNNEL_TOKEN
@@ -600,7 +525,7 @@ sudo systemctl start cloudflared
 sudo systemctl status cloudflared
 ```
 
-### 24. Verify the public hostname
+### 23. Verify the public hostname
 
 ```bash
 curl http://127.0.0.1:8000/health
@@ -612,16 +537,18 @@ Then open:
 https://PUBLIC_HOSTNAME
 ```
 
-## Part 9: Refresh Workflow
+## Part 7: Refresh Workflow
 
 When the dataset changes:
 
 1. upload the new dataset files to S3
 2. submit the EMR Spark step again
-3. wait for the EMR step to finish
-4. let the EC2 sync timer refresh the local results, or run the sync script manually
+3. wait for the EMR step to complete
+4. the web app will read the updated DynamoDB rows directly
 
 If the Spark script changes, upload [spark/spark_analysis.py](/Users/jimyang/PycharmProjects/project-harpy-eagle/spark/spark_analysis.py) to the S3 `code/` prefix again before submitting the next EMR step.
+
+If the EMR cluster is configured to terminate after the last step, a new cluster must be created before the next rerun.
 
 ## Troubleshooting
 
@@ -629,21 +556,23 @@ If the Spark script changes, upload [spark/spark_analysis.py](/Users/jimyang/Pyc
 
 - verify the EMR cluster includes the `Spark` application
 - verify the EMR roles can read `code/` and `dataset/`
-- verify the EMR roles can write `results/` and `logs/`
+- verify the EMR roles can write `logs/`
+- verify the EMR roles can read and write the DynamoDB tables
 - verify the dataset exists under `s3://PROJECT_BUCKET/project-harpy-eagle/dataset/detail-records/`
 
-### S3 results are missing on EC2
+### DynamoDB tables are empty
 
-- verify the EC2 instance role can read the S3 bucket
-- run [scripts/sync_results_from_s3.sh](/Users/jimyang/PycharmProjects/project-harpy-eagle/scripts/sync_results_from_s3.sh) manually
-- inspect `sudo journalctl -u project-harpy-eagle-sync-results.service -n 100 --no-pager`
+- verify `create_dynamodb_tables.sh` was run before the EMR step
+- verify the Spark step completed with `State: COMPLETED`
+- scan the summary table manually
+- query the events table manually
 
 ### `/ready` returns `503`
 
-- verify `/opt/project-harpy-eagle/results/drivers_summary.json` exists
-- verify `/opt/project-harpy-eagle/results/driver_behavior_records.json` exists
-- verify `/opt/project-harpy-eagle/results/per_driver_speed_data/*.json` exists
-- confirm `RESULTS_DIR=/opt/project-harpy-eagle/results`
+- verify the EC2 instance role can read the DynamoDB tables
+- verify `DDB_SUMMARY_TABLE`, `DDB_EVENTS_TABLE`, and `DDB_EVENTS_DATE_INDEX` match the actual table and index names
+- verify the tables contain data
+- inspect `sudo journalctl -u project-harpy-eagle -n 100 --no-pager`
 
 ### Cloudflare Tunnel does not connect
 
@@ -657,11 +586,11 @@ If the Spark script changes, upload [spark/spark_analysis.py](/Users/jimyang/Pyc
 For the report, capture screenshots of:
 
 1. the S3 bucket layout
-2. the EMR cluster details
-3. the EMR step completion status
-4. the S3 `results/` prefix
-5. the EC2 instance details
-6. `systemctl status project-harpy-eagle`
-7. `systemctl status project-harpy-eagle-sync-results.timer`
+2. the DynamoDB table definitions
+3. the EMR cluster details
+4. the EMR step completion status
+5. example DynamoDB summary and events queries
+6. the EC2 instance details
+7. `systemctl status project-harpy-eagle`
 8. the website homepage
 9. the Cloudflare tunnel page in the web console or `systemctl status cloudflared`
