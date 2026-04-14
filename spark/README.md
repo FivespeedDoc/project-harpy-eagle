@@ -34,14 +34,15 @@ brew install openjdk@17
 ```bash
 source .venv/bin/activate
 export JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"
-python spark/spark_analysis.py \
-  --master local[*] \
-  --summary-table project-harpy-eagle-driver-summary \
-  --events-table project-harpy-eagle-driver-events \
-  --aws-region ap-southeast-1
+export AWS_REGION=ap-southeast-1
+./scripts/run_local_spark_to_dynamodb.sh \
+  project-harpy-eagle-driver-summary \
+  project-harpy-eagle-driver-events
 ```
 
-This mode is intended for development only.
+This wrapper uses `spark-submit --master local[*]` and calls the same [spark_analysis.py](/Users/jimyang/PycharmProjects/project-harpy-eagle/spark/spark_analysis.py) entrypoint that EMR runs. The only runtime difference is the local Spark master; the DynamoDB write path is the same.
+
+The local wrapper is destructive with respect to its target tables. It clears the summary and events tables before rewriting them, exactly like the EMR job. Running the local wrapper against the same tables as an active EMR run will wipe and replace those rows.
 
 ## Options
 
@@ -94,6 +95,8 @@ spark-submit --deploy-mode cluster \
 ```
 
 The helper script [add_spark_step.sh](/Users/jimyang/PycharmProjects/project-harpy-eagle/deploy/emr/add_spark_step.sh) submits the equivalent command as an EMR step.
+
+When the cluster is created in the EMR console, the EMR EC2 instance profile must include permission to write to the summary table and events table in DynamoDB. The Spark job uses the AWS SDK directly on the cluster nodes, so those table permissions must be available to the instance profile used by the EMR EC2 instances.
 
 ## Verify Output
 

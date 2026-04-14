@@ -148,4 +148,6 @@ export AWS_REGION=ap-southeast-1
   project-harpy-eagle-driver-events
 ```
 
+When the EMR cluster is created in the AWS console, the EMR EC2 instance profile must include DynamoDB permissions for the summary table, the events table, and the events date index. The Spark job writes to DynamoDB directly from the EMR nodes, so the service role alone is not sufficient.
+
 If the DynamoDB tables are empty or inaccessible, the dashboard shows a setup notice instead of failing silently.

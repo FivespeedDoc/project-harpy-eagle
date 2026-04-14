@@ -58,6 +58,14 @@ Recommended IAM model:
 - EMR uses the default EMR service role and instance profile, or equivalent custom roles
 - the EC2 instance role includes DynamoDB read access and `CloudWatchLogs` permissions if log shipping is desired
 
+Important:
+
+- the Spark job in this repository calls DynamoDB directly through the AWS SDK inside the EMR cluster
+- because of that, the required DynamoDB permissions must be granted to the EMR EC2 instance profile used by the cluster nodes
+- the EMR service role is not the role that application code uses for these DynamoDB calls
+
+If the cluster is created in the AWS web console, this is configured in the IAM roles section during cluster creation. The EC2 instance profile selected there must include the DynamoDB permissions listed below.
+
 For the EC2 host, the minimum DynamoDB permissions are:
 
 - `dynamodb:DescribeTable`
@@ -70,6 +78,13 @@ For EMR, the Spark job additionally needs:
 - `dynamodb:PutItem`
 - `dynamodb:DeleteItem`
 - `dynamodb:Scan`
+- `dynamodb:DescribeTable`
+
+Recommended DynamoDB resource scope for the EMR EC2 instance profile:
+
+- the summary table ARN
+- the events table ARN
+- the events index ARN, for example `arn:aws:dynamodb:REGION:ACCOUNT_ID:table/project-harpy-eagle-driver-events/index/event-date-index`
 
 ## Part 2: Local Preparation
 
@@ -140,6 +155,22 @@ Create an EMR cluster with these minimum characteristics:
 - log URI: `s3://PROJECT_BUCKET/project-harpy-eagle/logs/`
 - node layout: at least one primary node and one core node
 
+Choose an EMR-supported instance type that fits the current EC2 vCPU quota for the AWS account and Region. Amazon EC2 On-Demand quotas are enforced in vCPUs, so the total vCPU count across the requested EMR nodes must stay within the available quota.
+
+Practical rule:
+
+- if the account has only the default low vCPU quota, start with a small 2-vCPU instance type for both the primary and core nodes
+- if larger instances are required, request an EC2 service quota increase before creating the cluster
+
+In the IAM roles section of the EMR console:
+
+- keep the EMR service role for cluster provisioning
+- select or create an EMR EC2 instance profile that has:
+  - S3 access to the project `code/`, `dataset/detail-records/`, and `logs/` prefixes
+  - DynamoDB access to the summary table, events table, and events date index
+
+Without the DynamoDB permissions on the EC2 instance profile, the submitted Spark step will fail when it tries to write the processed output.
+
 The Spark job should be submitted after cluster creation as a separate EMR step.
 
 ### 6A. Console configuration used for this project
@@ -157,8 +188,8 @@ The EMR cluster used for this project was created in the AWS web console with th
   - 1 core node
   - 0 task nodes
 - instance type:
-  - primary: `c3.2xlarge`
-  - core: `c3.2xlarge`
+- primary: `c3.2xlarge`
+- core: `c3.2xlarge`
 - root volume:
   - `gp3`
   - `30 GiB`
@@ -170,6 +201,12 @@ The EMR cluster used for this project was created in the AWS web console with th
 - project VPC, subnet, and SSH key selected in the console
 
 Environment-specific identifiers should be replaced with placeholders in submitted documentation.
+
+Note:
+
+- this `c3.2xlarge` example reflects the console configuration that was captured for documentation
+- it is not guaranteed to fit the default EC2 quota in a new AWS account
+- if the cluster creation fails with a vCPU quota error, reduce the instance size or request a quota increase and retry
 
 ### 6B. Cluster lifetime behavior
 

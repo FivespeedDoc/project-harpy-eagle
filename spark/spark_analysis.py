@@ -84,6 +84,12 @@ def build_parser():
     parser.add_argument("--events-table", default=os.getenv("DDB_EVENTS_TABLE", ""))
     parser.add_argument("--aws-region", default=os.getenv("AWS_REGION", ""))
     parser.add_argument(
+        "--shuffle-partitions",
+        default=int(os.getenv("SPARK_SHUFFLE_PARTITIONS", "16")),
+        type=int,
+        help="Shuffle partition count for Spark SQL operations. Lower values are usually better for this dataset size.",
+    )
+    parser.add_argument(
         "--master",
         default=None,
         help="Optional Spark master. Use this for local runs only. Leave unset on EMR or other cluster managers.",
@@ -153,17 +159,9 @@ def build_drivers_summary(df):
 
 def build_event_records(df):
     """Build one DynamoDB item per event record."""
-    driver_window = Window.partitionBy("driverID").orderBy(
-        F.col("time"),
-        F.col("siteName"),
-        F.col("latitude"),
-        F.col("longitude"),
-        F.col("speed"),
-        F.col("direction"),
-    )
-
-    sequence = F.row_number().over(driver_window)
-    padded_sequence = F.lpad(sequence.cast("string"), 12, "0")
+    # A monotonic tie-breaker keeps keys unique without the per-driver sort cost of row_number().
+    # The primary ordering remains chronological because the sort key still starts with `time`.
+    padded_sequence = F.lpad(F.monotonically_increasing_id().cast("string"), 20, "0")
 
     return (
         df.select(
@@ -186,18 +184,22 @@ def build_event_records(df):
             "isOilLeak",
         )
         .withColumn("eventDate", F.substring("time", 1, 10))
-        .withColumn("eventSequence", sequence)
         .withColumn("eventKey", F.concat_ws("#", F.col("time"), padded_sequence))
         .withColumn(
             "eventTimeDriverKey",
             F.concat_ws("#", F.col("time"), F.col("driverID"), padded_sequence),
         )
-        .drop("siteName", "direction", "eventSequence")
+        .drop("siteName", "direction")
     )
 
 
-def create_spark_session(app_name, master=None):
-    builder = SparkSession.builder.appName(app_name)
+def create_spark_session(app_name, master=None, shuffle_partitions=16):
+    builder = (
+        SparkSession.builder
+        .appName(app_name)
+        .config("spark.sql.adaptive.enabled", "true")
+        .config("spark.sql.shuffle.partitions", str(max(1, shuffle_partitions)))
+    )
     if master:
         builder = builder.master(master)
     return builder.getOrCreate()
@@ -264,31 +266,38 @@ def validate_dynamodb_args(args):
 def write_dynamodb_outputs(args, df):
     validate_dynamodb_args(args)
 
-    drivers_summary_df = build_drivers_summary(df)
-    drivers_summary_data = [row.asDict() for row in drivers_summary_df.collect()]
-
-    event_records_df = build_event_records(df)
-    event_count = event_records_df.count()
-
     try:
+        print(f"Computing driver summary rows for table {args.summary_table} ...")
+        drivers_summary_df = build_drivers_summary(df)
+        drivers_summary_data = [row.asDict() for row in drivers_summary_df.collect()]
+        print(f"Computed {len(drivers_summary_data)} summary rows.")
+
+        print(f"Clearing summary table {args.summary_table} ...")
         clear_dynamodb_table(args.summary_table, ["driverID"], args.aws_region)
-        clear_dynamodb_table(args.events_table, ["driverID", "eventKey"], args.aws_region)
+        print(f"Writing summary rows to {args.summary_table} ...")
         write_summary_to_dynamodb(drivers_summary_data, args.summary_table, args.aws_region)
+        print(f"Summary table refresh complete for {args.summary_table}.")
+
+        print(f"Building event records for table {args.events_table} ...")
+        event_records_df = build_event_records(df)
+        print(f"Clearing event table {args.events_table} ...")
+        clear_dynamodb_table(args.events_table, ["driverID", "eventKey"], args.aws_region)
+        print(f"Writing event records to {args.events_table} ...")
         write_events_to_dynamodb(event_records_df, args.events_table, args.aws_region)
+        print(f"Event table refresh complete for {args.events_table}.")
     except (ClientError, BotoCoreError) as exc:
         raise RuntimeError("Failed to write Spark output to DynamoDB.") from exc
-
-    print(
-        f"Drivers summary for {len(drivers_summary_data)} drivers written to DynamoDB table {args.summary_table}"
-    )
-    print(f"Event records written to DynamoDB table {args.events_table}: {event_count}")
 
 
 def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    spark = create_spark_session(app_name=args.app_name, master=args.master)
+    spark = create_spark_session(
+        app_name=args.app_name,
+        master=args.master,
+        shuffle_partitions=args.shuffle_partitions,
+    )
     spark.sparkContext.setLogLevel(args.log_level.upper())
 
     df = spark.read.csv(args.input, schema=SCHEMA, header=False).fillna(0, subset=FLAG_COLS)
