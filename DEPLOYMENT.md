@@ -205,6 +205,7 @@ After the step completes, confirm these objects exist in S3:
 
 ```text
 s3://PROJECT_BUCKET/project-harpy-eagle/results/drivers_summary.json
+s3://PROJECT_BUCKET/project-harpy-eagle/results/driver_behavior_records.json
 s3://PROJECT_BUCKET/project-harpy-eagle/results/per_driver_speed_data/*.json
 ```
 
@@ -614,6 +615,7 @@ If the Spark script changes, upload [spark/spark_analysis.py](/Users/jimyang/Pyc
 ### `/ready` returns `503`
 
 - verify `/opt/project-harpy-eagle/results/drivers_summary.json` exists
+- verify `/opt/project-harpy-eagle/results/driver_behavior_records.json` exists
 - verify `/opt/project-harpy-eagle/results/per_driver_speed_data/*.json` exists
 - confirm `RESULTS_DIR=/opt/project-harpy-eagle/results`
 

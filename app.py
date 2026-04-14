@@ -1,56 +1,19 @@
 import json
-import os
-from pathlib import Path
 
 from flask import Flask, current_app, jsonify, render_template, request
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-BASE_DIR = Path(__file__).resolve().parent
-SUMMARY_FILE = "drivers_summary.json"
-SPEED_DATA_DIR = "per_driver_speed_data"
-DEFAULT_SPEED_BATCH_SIZE = 50
-MAX_SPEED_BATCH_SIZE = 500
-MISSING_RESULTS_MESSAGE = (
-    "Generated results are missing. Run the Spark analysis and populate `RESULTS_DIR` before opening the dashboard."
+from services.config import build_config
+from services.results_store import ResultsStore
+from services.summary_service import (
+    aggregate_behavior_records,
+    has_period_filter,
+    parse_summary_period,
 )
 
 
-def _load_json(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _get_int_env(name, default):
-    value = os.getenv(name)
-    if value is None:
-        return default
-
-    try:
-        return int(value)
-    except ValueError as exc:
-        raise RuntimeError(f"Environment variable {name} must be an integer.") from exc
-
-
-def _build_config():
-    default_batch_size = max(1, _get_int_env("DEFAULT_SPEED_BATCH_SIZE", DEFAULT_SPEED_BATCH_SIZE))
-    max_batch_size = max(default_batch_size, _get_int_env("MAX_SPEED_BATCH_SIZE", MAX_SPEED_BATCH_SIZE))
-
-    return {
-        "APP_HOST": os.getenv("APP_HOST", "127.0.0.1"),
-        "APP_PORT": _get_int_env("APP_PORT", 5000),
-        "RESULTS_DIR": Path(os.getenv("RESULTS_DIR", str(BASE_DIR / "results"))).expanduser().resolve(),
-        "DEFAULT_SPEED_BATCH_SIZE": default_batch_size,
-        "MAX_SPEED_BATCH_SIZE": max_batch_size,
-        "JSON_SORT_KEYS": False,
-    }
-
-
-def _results_dir():
-    return Path(current_app.config["RESULTS_DIR"])
-
-
-def _speed_data_dir():
-    return _results_dir() / SPEED_DATA_DIR
+def _results_store():
+    return ResultsStore(current_app.config["RESULTS_DIR"])
 
 
 def _get_batch_window():
@@ -62,63 +25,6 @@ def _get_batch_window():
     return offset, min(limit, current_app.config["MAX_SPEED_BATCH_SIZE"])
 
 
-def _summary_status():
-    results_dir = _results_dir()
-    summary_path = results_dir / SUMMARY_FILE
-
-    if not results_dir.is_dir():
-        return {
-            "ready": False,
-            "message": MISSING_RESULTS_MESSAGE,
-        }
-
-    if not summary_path.is_file():
-        return {
-            "ready": False,
-            "message": "The summary JSON is missing. Re-run the Spark analysis and refresh `RESULTS_DIR` to regenerate the dashboard data.",
-        }
-
-    return {"ready": True, "message": ""}
-
-
-def _speed_status():
-    results_dir = _results_dir()
-    speed_dir = _speed_data_dir()
-
-    if not results_dir.is_dir():
-        return {
-            "ready": False,
-            "message": MISSING_RESULTS_MESSAGE,
-        }
-
-    if not speed_dir.is_dir():
-        return {
-            "ready": False,
-            "message": "Per-driver speed data is missing. Re-run the Spark analysis and refresh `RESULTS_DIR` to regenerate the dashboard data.",
-        }
-
-    driver_files = [path.name for path in speed_dir.iterdir() if path.suffix == ".json"]
-    if not driver_files:
-        return {
-            "ready": False,
-            "message": "No per-driver speed files were found. Re-run the Spark analysis and refresh `RESULTS_DIR` to populate the dashboard data.",
-        }
-
-    return {"ready": True, "message": ""}
-
-
-def _dashboard_status():
-    messages = []
-    for status in (_summary_status(), _speed_status()):
-        if not status["ready"] and status["message"] not in messages:
-            messages.append(status["message"])
-
-    if messages:
-        return {"ready": False, "message": " ".join(messages)}
-
-    return {"ready": True, "message": ""}
-
-
 def _json_error(message, status_code=503):
     return jsonify({"error": message}), status_code
 
@@ -126,29 +32,29 @@ def _json_error(message, status_code=503):
 def register_routes(app):
     @app.get("/")
     def index():
-        results_status = _dashboard_status()
-        return render_template("base.html", results_status=results_status)
+        store = _results_store()
+        return render_template("base.html", results_status=store.dashboard_status())
 
     @app.get("/health")
     def health():
-        summary_status = _summary_status()
-        speed_status = _speed_status()
-        dashboard_status = _dashboard_status()
+        store = _results_store()
+        dashboard_status = store.dashboard_status()
 
         return jsonify({
             "status": "ok",
             "dashboard_ready": dashboard_status["ready"],
-            "results_dir": str(_results_dir()),
+            "results_dir": str(store.results_dir),
             "checks": {
-                "summary": summary_status,
-                "speed": speed_status,
+                "summary": store.summary_status(),
+                "speed": store.speed_status(),
             },
         })
 
     @app.get("/ready")
     def ready():
-        dashboard_status = _dashboard_status()
+        dashboard_status = _results_store().dashboard_status()
         status_code = 200 if dashboard_status["ready"] else 503
+
         return jsonify({
             "status": "ready" if dashboard_status["ready"] else "not_ready",
             "message": dashboard_status["message"],
@@ -156,13 +62,16 @@ def register_routes(app):
 
     @app.get("/api/summary")
     def api_summary():
-        results_status = _summary_status()
+        store = _results_store()
+        results_status = store.summary_status()
         if not results_status["ready"]:
             return _json_error(results_status["message"])
 
-        path = _results_dir() / SUMMARY_FILE
+        if has_period_filter(request.args):
+            return _period_summary_response(store)
+
         try:
-            return jsonify(_load_json(path))
+            return jsonify(store.load_summary())
         except (FileNotFoundError, json.JSONDecodeError):
             return _json_error(
                 "The summary data could not be read. Re-run the Spark analysis and refresh `RESULTS_DIR` to regenerate the results."
@@ -170,37 +79,29 @@ def register_routes(app):
 
     @app.get("/api/drivers")
     def api_drivers():
-        """Return the list of available driver IDs."""
-        results_status = _speed_status()
+        store = _results_store()
+        results_status = store.speed_status()
         if not results_status["ready"]:
             return _json_error(results_status["message"])
 
-        drivers = sorted(path.stem for path in _speed_data_dir().iterdir() if path.suffix == ".json")
-        return jsonify(drivers)
+        return jsonify(store.list_drivers())
 
     @app.get("/api/speed/<driver_id>")
     def api_speed(driver_id):
-        """
-        Returns a *batch* of speed records for the given driver.
-
-        :param
-            offset – index of first record to return (default 0)
-            limit  – max number of records to return  (default 50)
-        """
-        results_status = _speed_status()
+        store = _results_store()
+        results_status = store.speed_status()
         if not results_status["ready"]:
             return _json_error(results_status["message"])
 
-        path = _speed_data_dir() / f"{driver_id}.json"
-        if not path.is_file():
-            return jsonify({"error": "driver not found"}), 404
-
         try:
-            data = _load_json(path)
+            data = store.load_speed_records(driver_id)
         except json.JSONDecodeError:
             return _json_error(
                 "The selected driver's speed data could not be read. Re-run the Spark analysis and refresh `RESULTS_DIR` to regenerate the results."
             )
+
+        if data is None:
+            return jsonify({"error": "driver not found"}), 404
 
         offset, limit = _get_batch_window()
         batch = data[offset : offset + limit]
@@ -215,9 +116,32 @@ def register_routes(app):
         })
 
 
+def _period_summary_response(store):
+    try:
+        start_time, end_time = parse_summary_period(
+            request.args.get("start"),
+            request.args.get("end"),
+        )
+    except ValueError as exc:
+        return _json_error(str(exc), 400)
+
+    behavior_status = store.behavior_records_status()
+    if not behavior_status["ready"]:
+        return _json_error(behavior_status["message"])
+
+    try:
+        records = store.load_behavior_records()
+    except (FileNotFoundError, json.JSONDecodeError):
+        return _json_error(
+            "The period-filter summary data could not be read. Re-run `python spark/spark_analysis.py` to regenerate the results."
+        )
+
+    return jsonify(aggregate_behavior_records(records, start_time, end_time))
+
+
 def create_app(test_config=None):
     app = Flask(__name__)
-    app.config.from_mapping(_build_config())
+    app.config.from_mapping(build_config())
 
     if test_config:
         app.config.update(test_config)
@@ -230,5 +154,5 @@ def create_app(test_config=None):
 app = create_app()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     app.run(host=app.config["APP_HOST"], port=app.config["APP_PORT"])

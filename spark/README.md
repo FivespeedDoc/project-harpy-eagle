@@ -46,9 +46,10 @@ This local mode is primarily for development and validation. Production deployme
 
 ```
 results/
-├── drivers_summary.json        # Per-driver behavior summary (Function A)
+├── drivers_summary.json          # Per-driver behavior summary (Function A)
+├── driver_behavior_records.json  # Period-filter source records for Function A
 └── per_driver_speed_data/
-    └── <driverID>.json         # Per-driver speed time-series (Function B)
+    └── <driverID>.json           # Per-driver speed time-series (Function B)
 ```
 
 ### Options

@@ -7,12 +7,17 @@
   var tableWrap = document.getElementById("summary-table-wrap");
   var statusEl = document.getElementById("summary-status");
   var rankingList = document.getElementById("risk-ranking-list");
+  var startInput = document.getElementById("summary-start");
+  var endInput = document.getElementById("summary-end");
+  var applyPeriodBtn = document.getElementById("summary-apply-period");
+  var resetPeriodBtn = document.getElementById("summary-reset-period");
+  var loadingOverlay = document.getElementById("summary-loading-overlay");
   var columns = [
     "risk_rank",
     "driverID",
     "carPlateNumber",
+    "period",
     "risk_score",
-    "risk_level",
     "overspeed_count",
     "total_overspeed_time",
     "fatigue_count",
@@ -31,6 +36,12 @@
     tableWrap.classList.toggle("hidden", !!message && !!isError);
   }
 
+  function setLoading(isLoading) {
+    if (loadingOverlay) {
+      loadingOverlay.classList.toggle("hidden", !isLoading);
+    }
+  }
+
   function getRiskClass(riskLevel) {
     return String(riskLevel || "")
       .toLowerCase()
@@ -40,7 +51,39 @@
   function formatCellValue(key, value) {
     if (value == null) return "";
     if (key === "risk_score") return Number(value).toFixed(1);
+    if (key === "total_overspeed_time" || key === "total_neutral_slide_time") {
+      return (Number(value) / 60).toFixed(1);
+    }
     return String(value);
+  }
+
+  function formatPeriod(record) {
+    if (record.period) return record.period;
+    if (record.start_time || record.end_time) {
+      return (record.start_time || "") + " ~ " + (record.end_time || "");
+    }
+    return "";
+  }
+
+  function buildPeriodCell(td, record) {
+    td.className = "period-cell";
+    td.innerHTML = "";
+
+    var start = record.start_time || "";
+    var end = record.end_time || "";
+    if (!start && !end && record.period) {
+      var parts = String(record.period).split(" ~ ");
+      start = parts[0] || "";
+      end = parts.slice(1).join(" ~ ");
+    }
+
+    var startLine = document.createElement("span");
+    startLine.textContent = start ? start + " ~" : "";
+    var endLine = document.createElement("span");
+    endLine.textContent = end;
+
+    td.appendChild(startLine);
+    td.appendChild(endLine);
   }
 
   function buildRow(record) {
@@ -49,11 +92,18 @@
 
     columns.forEach(function (key) {
       var td = document.createElement("td");
-      td.textContent = formatCellValue(key, record[key]);
-      if (key === "risk_level") {
-        td.className = "risk-level-cell";
+      td.textContent = key === "period" ? formatPeriod(record) : formatCellValue(key, record[key]);
+      if (key === "period") {
+        buildPeriodCell(td, record);
+      }
+      if (key === "risk_score") {
+        td.className = "risk-score-cell";
         td.innerHTML = "";
-        td.appendChild(buildRiskBadge(record[key]));
+        var riskContent = document.createElement("span");
+        riskContent.className = "risk-score-content";
+        riskContent.appendChild(document.createTextNode(formatCellValue(key, record[key])));
+        riskContent.appendChild(buildRiskBadge(record.risk_level));
+        td.appendChild(riskContent);
       }
       tr.appendChild(td);
     });
@@ -117,9 +167,109 @@
     rankingList.appendChild(fragment);
   }
 
+  function hasPeriodFilter() {
+    return !!((startInput && startInput.value) || (endInput && endInput.value));
+  }
+
+  function buildSummaryUrl() {
+    var params = new URLSearchParams();
+    if (startInput && startInput.value) params.set("start", startInput.value);
+    if (endInput && endInput.value) params.set("end", endInput.value);
+
+    var query = params.toString();
+    return "/api/summary" + (query ? "?" + query : "");
+  }
+
+  function parseDatasetTime(value) {
+    if (!value) return null;
+
+    var parts = String(value).replace("T", " ").split(/[- :]/).map(Number);
+    if (parts.length < 5 || parts.some(isNaN)) return null;
+
+    return new Date(
+      parts[0],
+      parts[1] - 1,
+      parts[2],
+      parts[3],
+      parts[4],
+      parts[5] || 0
+    );
+  }
+
+  function padTimePart(value) {
+    return String(value).padStart(2, "0");
+  }
+
+  function formatDatetimeLocal(date) {
+    return [
+      date.getFullYear(),
+      padTimePart(date.getMonth() + 1),
+      padTimePart(date.getDate()),
+    ].join("-") + "T" + [
+      padTimePart(date.getHours()),
+      padTimePart(date.getMinutes()),
+      padTimePart(date.getSeconds()),
+    ].join(":");
+  }
+
+  function addMinutes(date, minutes) {
+    return new Date(date.getTime() + minutes * 60 * 1000);
+  }
+
+  function getSummaryBounds(data) {
+    var earliest = null;
+    var latest = null;
+
+    data.forEach(function (record) {
+      var startTime = parseDatasetTime(record.start_time);
+      var endTime = parseDatasetTime(record.end_time);
+
+      if (startTime && (!earliest || startTime < earliest)) earliest = startTime;
+      if (endTime && (!latest || endTime > latest)) latest = endTime;
+    });
+
+    if (!earliest || !latest) return null;
+
+    return {
+      start: addMinutes(earliest, -1),
+      end: addMinutes(latest, 1),
+    };
+  }
+
+  function setDefaultPeriod(data) {
+    if (!startInput || !endInput || startInput.value || endInput.value) return;
+
+    var bounds = getSummaryBounds(data);
+    if (!bounds) return;
+
+    startInput.value = formatDatetimeLocal(bounds.start);
+    endInput.value = formatDatetimeLocal(bounds.end);
+  }
+
+  function formatDisplayTime(value) {
+    return String(value || "").replace("T", " ");
+  }
+
+  function summaryPeriodMessage() {
+    var start = startInput ? formatDisplayTime(startInput.value) : "";
+    var end = endInput ? formatDisplayTime(endInput.value) : "";
+
+    if (start && end) return "Currently displaying summary for " + start + " ~ " + end + ".";
+    if (start) return "Currently displaying summary from " + start + ".";
+    if (end) return "Currently displaying summary until " + end + ".";
+
+    return "";
+  }
+
   async function loadSummary() {
     try {
-      var resp = await fetch("/api/summary");
+      if (startInput && endInput && startInput.value && endInput.value && startInput.value > endInput.value) {
+        throw new Error("Start time must be earlier than or equal to end time.");
+      }
+
+      var isFilteredRequest = hasPeriodFilter();
+      setLoading(true);
+      var resp = await fetch(buildSummaryUrl());
       var data = await resp.json();
       if (!resp.ok) {
         throw new Error(data.error || "Unable to load the summary data.");
@@ -132,11 +282,18 @@
       rankingList.innerHTML = "";
 
       if (!data.length) {
-        setStatus("No summary data was generated yet.", false);
+        setStatus(
+          hasPeriodFilter()
+            ? "No summary data was found for the selected period."
+            : "No summary data was generated yet.",
+          false
+        );
         return;
       }
 
-      setStatus("", false);
+      if (!isFilteredRequest) setDefaultPeriod(data);
+
+      setStatus(isFilteredRequest ? summaryPeriodMessage() : "", false);
       renderRanking(data);
       var fragment = document.createDocumentFragment();
       data.forEach(function (d) {
@@ -147,8 +304,29 @@
       tbody.innerHTML = "";
       rankingList.innerHTML = "";
       setStatus(err.message, true);
+    } finally {
+      setLoading(false);
     }
   }
+
+  if (applyPeriodBtn) {
+    applyPeriodBtn.addEventListener("click", loadSummary);
+  }
+
+  if (resetPeriodBtn) {
+    resetPeriodBtn.addEventListener("click", function () {
+      if (startInput) startInput.value = "";
+      if (endInput) endInput.value = "";
+      loadSummary();
+    });
+  }
+
+  [startInput, endInput].forEach(function (input) {
+    if (!input) return;
+    input.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") loadSummary();
+    });
+  });
 
   loadSummary();
 })();

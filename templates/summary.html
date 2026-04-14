@@ -1,9 +1,23 @@
 <section id="panel-summary" class="panel active">
   <div class="panel-header">
     <h2>Driving Behavior Summary</h2>
-    <p class="subtitle">Aggregated statistics for all drivers over the recorded period</p>
+    <p class="subtitle">Aggregated statistics for all drivers during the selected period</p>
+  </div>
+  <div class="summary-filters" aria-label="Summary period filter">
+    <label for="summary-start">Start:</label>
+    <input id="summary-start" class="summary-period-input" type="datetime-local" step="1">
+    <label for="summary-end">End:</label>
+    <input id="summary-end" class="summary-period-input" type="datetime-local" step="1">
+    <button id="summary-apply-period" class="aqua-btn" type="button">Apply Period</button>
+    <button id="summary-reset-period" class="aqua-btn summary-reset-btn" type="button">Reset</button>
   </div>
   <p id="summary-status" class="panel-status hidden" role="status" aria-live="polite"></p>
+  <div id="summary-loading-overlay" class="summary-loading-overlay hidden" role="status" aria-live="polite">
+    <div class="summary-loading-box">
+      <span class="summary-spinner" aria-hidden="true"></span>
+      <span>Loading summary...</span>
+    </div>
+  </div>
   <section class="risk-ranking" aria-label="Driver risk ranking">
     <div class="risk-ranking-header">
       <h3>Driver Risk Ranking</h3>
@@ -18,13 +32,13 @@
           <th>Risk Rank</th>
           <th>Driver ID</th>
           <th>Plate Number</th>
-          <th>Risk Score</th>
-          <th>Risk Level</th>
+          <th>Period</th>
+          <th>Risk</th>
           <th>Overspeed Count</th>
-          <th>Overspeed Time (s)</th>
+          <th>Overspeed Time (min)</th>
           <th>Fatigue Count</th>
           <th>Neutral Slide Count</th>
-          <th>Neutral Slide Time (s)</th>
+          <th>Neutral Slide Time (min)</th>
           <th>Rapid Speed-up</th>
           <th>Rapid Slowdown</th>
           <th>H-Throttle Stop</th>

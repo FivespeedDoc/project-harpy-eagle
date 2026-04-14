@@ -63,6 +63,7 @@ python spark/spark_analysis.py --master local[*]
 This generates:
 
 - `results/drivers_summary.json`
+- `results/driver_behavior_records.json`
 - `results/per_driver_speed_data/<driverID>.json`
 
 ### Run the Web App

@@ -3,7 +3,8 @@ pyspark analysis script for driver behavior data.
 
 Reads raw CSV records from dataset/detail-records/ or S3, computes:
   1. Per-driver behavior summary  -> results/drivers_summary.json
-  2. Per-driver speed time-series -> results/per_driver_speed_data/<driverID>.json
+  2. Period-filter source records -> results/driver_behavior_records.json
+  3. Per-driver speed time-series -> results/per_driver_speed_data/<driverID>.json
 
 Run locally (from root dir):
     export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
@@ -86,6 +87,8 @@ def build_parser():
 def build_drivers_summary(df):
     """Aggregate per-driver behavior statistics (Function A)."""
     summary_df = df.groupBy("driverID", "carPlateNumber").agg(
+        F.min("time").alias("start_time"),
+        F.max("time").alias("end_time"),
         F.sum("isOverspeed").cast("int").alias("overspeed_count"),
         F.sum("overspeedTime").alias("total_overspeed_time"),
         F.sum("isFatigueDriving").cast("int").alias("fatigue_count"),
@@ -111,6 +114,7 @@ def build_drivers_summary(df):
 
     return (
         scored_df
+        .withColumn("period", F.concat_ws(" ~ ", F.col("start_time"), F.col("end_time")))
         .withColumn("max_risk_raw_score", F.max("risk_raw_score").over(all_drivers))
         .withColumn("min_risk_raw_score", F.min("risk_raw_score").over(all_drivers))
         .withColumn(
@@ -142,6 +146,27 @@ def build_per_driver_speed_series(df):
     """Select columns needed for real-time speed monitoring (Function B)."""
     return (
         df.select("driverID", "carPlateNumber", "time", "speed", "isOverspeed", "latitude", "longitude")
+        .orderBy("driverID", "time")
+    )
+
+
+def build_behavior_records(df):
+    """Keep the per-record fields needed for period-filtered behavior summaries."""
+    return (
+        df.select(
+            "driverID",
+            "carPlateNumber",
+            "time",
+            "isOverspeed",
+            "overspeedTime",
+            "isFatigueDriving",
+            "isNeutralSlide",
+            "neutralSlideTime",
+            "isRapidlySpeedup",
+            "isRapidlySlowdown",
+            "isHthrottleStop",
+            "isOilLeak",
+        )
         .orderBy("driverID", "time")
     )
 
@@ -210,6 +235,13 @@ def main():
     drivers_summary_path = _join_output_path(args.output, "drivers_summary.json")
     save_json(spark, drivers_summary_data, drivers_summary_path)
     print(f"Drivers summary for {len(drivers_summary_data)} drivers saved to {drivers_summary_path}")
+
+    # detail records for period-filtered summary queries
+    behavior_records_df = build_behavior_records(df)
+    behavior_records_data = [row.asDict() for row in behavior_records_df.collect()]
+    behavior_records_path = _join_output_path(args.output, "driver_behavior_records.json")
+    save_json(spark, behavior_records_data, behavior_records_path)
+    print(f"Behavior records for period filters saved to {behavior_records_path}")
 
     # per-driver speed time-series
     per_driver_speed_series_df = build_per_driver_speed_series(df)
