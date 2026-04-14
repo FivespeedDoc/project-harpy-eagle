@@ -51,11 +51,15 @@ Recommended naming:
 - generated results: `s3://PROJECT_BUCKET/project-harpy-eagle/results/`
 - EMR logs: `s3://PROJECT_BUCKET/project-harpy-eagle/logs/`
 
+Current project bucket example:
+
+- base prefix: `s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle/`
+
 ### 2. Prepare AWS permissions
 
 Two AWS permission paths are required:
 
-- the local machine or CI environment that uploads assets and submits EMR steps needs AWS CLI credentials
+- the local machine or CI environment that uploads assets and submits EMR steps needs an authenticated AWS CLI session
 - the EC2 web server needs read access to the S3 `results/` prefix
 
 Recommended IAM configuration:
@@ -74,7 +78,9 @@ Recommended IAM configuration:
 From the project root on the local machine:
 
 ```bash
-./scripts/upload_emr_assets_to_s3.sh s3://PROJECT_BUCKET/project-harpy-eagle
+aws login
+export AWS_REGION=ap-southeast-1
+./scripts/upload_emr_assets_to_s3.sh s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle
 ```
 
 This uploads:
@@ -85,14 +91,18 @@ This uploads:
 If the dataset lives outside the default local path, pass it explicitly:
 
 ```bash
-./scripts/upload_emr_assets_to_s3.sh s3://PROJECT_BUCKET/project-harpy-eagle /path/to/detail-records
+aws login
+export AWS_REGION=ap-southeast-1
+./scripts/upload_emr_assets_to_s3.sh s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle /path/to/detail-records
 ```
 
 Manual equivalent:
 
 ```bash
-aws s3 cp spark/spark_analysis.py s3://PROJECT_BUCKET/project-harpy-eagle/code/spark_analysis.py
-aws s3 sync dataset/detail-records/ s3://PROJECT_BUCKET/project-harpy-eagle/dataset/detail-records/
+aws login
+export AWS_REGION=ap-southeast-1
+aws s3 cp spark/spark_analysis.py s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle/code/spark_analysis.py
+aws s3 sync dataset/detail-records/ s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle/dataset/detail-records/
 ```
 
 ## Part 3: Run Spark on EMR
@@ -110,6 +120,68 @@ Notes:
 
 - no `--master` argument should be passed to `spark/spark_analysis.py` on EMR
 - the script already supports `s3://...` input and output paths
+
+### 4A. Reference EMR Configuration Used in the Console
+
+The EMR cluster used for this project was configured in the AWS web console with the following settings:
+
+- cluster name: a project-specific cluster name
+- Amazon EMR release: `emr-7.12.0`
+- application bundle type: `Custom`
+- installed applications:
+  - `Hadoop 3.4.1`
+  - `Spark 3.5.6`
+
+Operating system configuration:
+
+- Amazon Linux release provided by EMR
+- automatic Amazon Linux updates enabled
+- no custom AMI
+
+Provisioning model:
+
+- unified instance group mode
+- manual sizing
+- no EMR managed scaling policy
+- no custom autoscaling configuration
+
+Node layout:
+
+- 1 primary node
+- 1 core node
+- 0 task nodes
+- primary node high availability not enabled
+
+Instance configuration:
+
+- primary node instance type: `c3.2xlarge`
+- core node instance type: `c3.2xlarge`
+- each node uses a `gp3` EBS root volume
+- root volume size: `30 GiB`
+- provisioned IOPS: `3000`
+- provisioned throughput: `125 MiB/s`
+
+Step and logging configuration:
+
+- no Spark step attached during cluster creation
+- cluster-specific logging to the project S3 log prefix
+- log prefix: `project-harpy-eagle/logs`
+
+Security and IAM configuration:
+
+- an EC2 key pair was selected for SSH access
+- the cluster was launched inside a project VPC and subnet selected in the console
+- EMR was allowed to create the service role
+- EMR was allowed to create the EC2 instance profile
+- S3 access was restricted to the required project prefixes rather than granting unrestricted access to all buckets
+
+This reference configuration matches the project workflow:
+
+1. upload Spark code and raw data to S3
+2. create the EMR cluster
+3. submit the Spark analysis as a separate EMR step
+4. write generated JSON results back to S3
+5. sync the S3 results onto the EC2 web server
 
 ### 5. Submit the Spark step
 
@@ -142,6 +214,76 @@ Example:
 aws s3 ls s3://PROJECT_BUCKET/project-harpy-eagle/results/
 aws s3 ls s3://PROJECT_BUCKET/project-harpy-eagle/results/per_driver_speed_data/ | head
 ```
+
+### 6A. Verify Successful EMR Step Completion
+
+Use the EMR step ID returned by `aws emr add-steps` and verify the step status:
+
+```bash
+aws emr describe-step \
+  --cluster-id <EMR_CLUSTER_ID> \
+  --step-id <EMR_STEP_ID> \
+  --region ap-southeast-1
+```
+
+A successful run should show:
+
+- `Name`: `project-harpy-eagle-spark-analysis`
+- `ActionOnFailure`: `CONTINUE`
+- `State`: `COMPLETED`
+
+Minimal successful example:
+
+```json
+{
+  "Step": {
+    "Id": "<EMR_STEP_ID>",
+    "Name": "project-harpy-eagle-spark-analysis",
+    "Config": {
+      "Jar": "command-runner.jar",
+      "Args": [
+        "spark-submit",
+        "--deploy-mode",
+        "cluster",
+        "s3://PROJECT_BUCKET/project-harpy-eagle/code/spark_analysis.py",
+        "--input",
+        "s3://PROJECT_BUCKET/project-harpy-eagle/dataset/detail-records/",
+        "--output",
+        "s3://PROJECT_BUCKET/project-harpy-eagle/results/",
+        "--log-level",
+        "ERROR"
+      ]
+    },
+    "ActionOnFailure": "CONTINUE",
+    "Status": {
+      "State": "COMPLETED"
+    }
+  }
+}
+```
+
+After a completed step, the S3 verification should show:
+
+- `drivers_summary.json` in the `results/` prefix
+- multiple per-driver JSON files in `results/per_driver_speed_data/`
+
+Example verification commands:
+
+```bash
+aws s3 ls s3://PROJECT_BUCKET/project-harpy-eagle/results/
+aws s3 ls s3://PROJECT_BUCKET/project-harpy-eagle/results/per_driver_speed_data/ | head
+```
+
+Expected outcome:
+
+- a `drivers_summary.json` object exists
+- a `per_driver_speed_data/` prefix exists
+- multiple `<driver_id>.json` files are present under that prefix
+
+Note:
+
+- the S3 console or `aws s3 ls` may show zero-byte folder marker objects for prefixes
+- the actual success criteria are the generated JSON result files, not the marker objects
 
 ## Part 4: Launch and Prepare the EC2 Web Server
 

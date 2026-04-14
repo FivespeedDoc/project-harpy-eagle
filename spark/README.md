@@ -74,9 +74,10 @@ On EMR, do not pass `--master`.
 Example:
 
 ```bash
-spark-submit --deploy-mode cluster s3://PROJECT_BUCKET/project-harpy-eagle/code/spark_analysis.py \
-  --input s3://PROJECT_BUCKET/project-harpy-eagle/dataset/detail-records/ \
-  --output s3://PROJECT_BUCKET/project-harpy-eagle/results/
+export AWS_REGION=ap-southeast-1
+spark-submit --deploy-mode cluster s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle/code/spark_analysis.py \
+  --input s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle/dataset/detail-records/ \
+  --output s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle/results/
 ```
 
 The helper script [add_spark_step.sh](/Users/jimyang/PycharmProjects/project-harpy-eagle/deploy/emr/add_spark_step.sh) submits this command as an EMR step.

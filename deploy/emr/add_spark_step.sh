@@ -58,23 +58,22 @@ fi
 read -r -d '' STEP_JSON <<EOF || true
 [
   {
+    "Type": "CUSTOM_JAR",
     "Name": "project-harpy-eagle-spark-analysis",
     "ActionOnFailure": "CONTINUE",
-    "HadoopJarStep": {
-      "Jar": "command-runner.jar",
-      "Args": [
-        "spark-submit",
-        "--deploy-mode",
-        "cluster",
-        "${SCRIPT_URI}",
-        "--input",
-        "${INPUT_URI}",
-        "--output",
-        "${OUTPUT_URI}",
-        "--log-level",
-        "${SPARK_LOG_LEVEL}"
-      ]
-    }
+    "Jar": "command-runner.jar",
+    "Args": [
+      "spark-submit",
+      "--deploy-mode",
+      "cluster",
+      "${SCRIPT_URI}",
+      "--input",
+      "${INPUT_URI}",
+      "--output",
+      "${OUTPUT_URI}",
+      "--log-level",
+      "${SPARK_LOG_LEVEL}"
+    ]
   }
 ]
 EOF

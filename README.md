@@ -116,4 +116,12 @@ Repository helpers for this flow:
 - [deploy/emr/add_spark_step.sh](deploy/emr/add_spark_step.sh)
 - [scripts/sync_results_from_s3.sh](scripts/sync_results_from_s3.sh)
 
+Example authenticated upload session:
+
+```bash
+aws login
+export AWS_REGION=ap-southeast-1
+./scripts/upload_emr_assets_to_s3.sh s3://project-harpy-eagle-641628981470-ap-southeast-1-an/project-harpy-eagle
+```
+
 If the generated files under `results/` are missing, the dashboard will show a setup notice instead of failing silently.
