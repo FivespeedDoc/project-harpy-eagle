@@ -47,11 +47,6 @@
   bottom: 12px;
   z-index: 3;
   width: 48px;
-  display: grid;
-  grid-template-rows: 20px repeat(5, 1fr);
-  align-items: center;
-  justify-items: end;
-  padding: 0 8px 18px 0;
   border-right: 1px solid #d8dde6;
   color: #555;
   font-size: 11px;
@@ -60,9 +55,18 @@
 }
 
 .chart-y-axis .axis-title {
+  position: absolute;
+  top: 6px;
+  left: 8px;
   color: #333;
   font-size: 12px;
   font-weight: 600;
+}
+
+.chart-y-axis .axis-tick {
+  position: absolute;
+  right: 8px;
+  transform: translateY(-50%);
 }
 
 .chart-scroll {

@@ -5,7 +5,7 @@
 
   var chartScroll = document.getElementById("speed-chart-scroll");
   var chartTrack = document.getElementById("speed-chart-track");
-  var chartAxisTicks = document.querySelectorAll(".chart-y-axis .axis-tick");
+  var chartYAxis = document.querySelector(".chart-y-axis");
 
   var chart = null;
   var chartLabels = [];
@@ -39,15 +39,23 @@
   }
 
   function updateYAxisLabels() {
-    if (!chart || !chart.scales || !chart.scales.y || !chartAxisTicks.length) return;
+    if (!chart || !chart.scales || !chart.scales.y || !chartYAxis) return;
 
     var yScale = chart.scales.y;
-    var max = yScale.max;
-    var min = yScale.min;
-    var step = (max - min) / (chartAxisTicks.length - 1);
+    var existingTicks = chartYAxis.querySelectorAll(".axis-tick");
 
-    chartAxisTicks.forEach(function (tick, index) {
-      tick.textContent = Math.round(max - step * index);
+    existingTicks.forEach(function (tick) {
+      tick.remove();
+    });
+
+    yScale.ticks.forEach(function (scaleTick) {
+      var tick = document.createElement("span");
+      var value = scaleTick.value;
+
+      tick.className = "axis-tick";
+      tick.textContent = Number.isInteger(value) ? value : Number(value).toFixed(1);
+      tick.style.top = yScale.getPixelForValue(value) + "px";
+      chartYAxis.appendChild(tick);
     });
   }
 
@@ -118,13 +126,19 @@
           y: {
             beginAtZero: true,
             suggestedMax: 160,
-            ticks: { display: false },
+            ticks: {
+              display: false,
+              stepSize: 40,
+            },
             border: { display: false },
             title: { display: false },
             afterFit: function (scale) {
               scale.width = 0;
             },
           },
+        },
+        onResize: function () {
+          requestAnimationFrame(updateYAxisLabels);
         },
         plugins: {
           legend: { display: false },
